@@ -37,13 +37,53 @@ DEMO_WARNING = (
     "SYNTHETIC DEMO — fixture sources, not evidence. Do not submit or cite this document."
 )
 
+# Searched in order when EVIDEX_PDF_FONT is not set. Unicode fonts with Persian/Arabic
+# coverage come first; Latin-only substitutes are a last resort for English projects.
+PDF_FONT_CANDIDATES = (
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+    "/usr/local/share/fonts/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Regular.ttf",
+    "~/.local/share/fonts/Vazirmatn-Regular.ttf",
+    "~/.fonts/Vazirmatn-Regular.ttf",
+    "/Library/Fonts/Arial Unicode.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+    "/System/Library/Fonts/Supplemental/Tahoma.ttf",
+    "C:/Windows/Fonts/tahoma.ttf",
+    "C:/Windows/Fonts/arial.ttf",
+)
+
+FONT_HELP = (
+    "Install a Unicode font (for Debian/Ubuntu: fonts-dejavu-core) or point "
+    "EVIDEX_PDF_FONT at an installed Unicode .ttf file."
+)
+
 
 class DocumentRenderer:
     def __init__(self, root: str | Path, font_path: str | Path | None = None):
         self.root = Path(root).resolve()
-        self.font_path = Path(font_path or "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
+        # An unset font is discovered at render time; an explicit one is never second-guessed.
+        self.font_path = Path(font_path) if font_path else None
+
+    def pdf_font(self) -> Path:
+        if self.font_path is not None:
+            if not self.font_path.is_file():
+                raise ValueError(
+                    f"Configured PDF font {self.font_path} does not exist. {FONT_HELP}"
+                )
+            return self.font_path
+        for candidate in PDF_FONT_CANDIDATES:
+            path = Path(candidate).expanduser()
+            if path.is_file():
+                return path
+        raise ValueError(f"No Unicode TTF font is available for PDF text. {FONT_HELP}")
 
     def render(self, job_id: str, payload: dict, *, demo_mode: bool = False) -> ExportPackage:
+        # Resolve the PDF font before doing any work: a missing font is a configuration
+        # error, not a reason to leave a half-written export directory behind.
+        font = self.pdf_font()
         brief = ProjectBrief.model_validate(payload["brief"])
         registry = SourceRegistry.model_validate(payload["registry"])
         sections = [SectionDraft.model_validate(s) for s in payload["sections"]]
@@ -138,12 +178,10 @@ class DocumentRenderer:
         # Model/user text never determines filesystem paths. Replace complete files atomically.
         directory = self.root / hashlib.sha256(job_id.encode()).hexdigest()
         directory.mkdir(parents=True, exist_ok=True)
-        if not self.font_path.is_file():
-            raise ValueError("PDF font missing; set EVIDEX_PDF_FONT to a Unicode TTF font")
         with TemporaryDirectory(dir=directory) as temp:
             temp = Path(temp)
             self._docx(paragraphs, temp / "document.docx", brief.language)
-            self._pdf(paragraphs, temp / "document.pdf", brief.language)
+            self._pdf(paragraphs, temp / "document.pdf", brief.language, font)
             (temp / "audit.json").write_text(
                 json.dumps(
                     {
@@ -198,11 +236,11 @@ class DocumentRenderer:
                     props.append(rtl)
         doc.save(path)
 
-    def _pdf(self, paragraphs, path: Path, language: Language):
+    def _pdf(self, paragraphs, path: Path, language: Language, font: Path):
         pdf = FPDF()
         pdf.set_auto_page_break(auto=True, margin=18)
         pdf.set_margins(18, 18, 18)
-        pdf.add_font("Unicode", fname=str(self.font_path))
+        pdf.add_font("Unicode", fname=str(font))
         pdf.set_text_shaping(True, direction="rtl" if language == Language.PERSIAN else "ltr")
         pdf.add_page()
         for kind, text in paragraphs:

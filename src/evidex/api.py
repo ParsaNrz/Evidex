@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from evidex.auth import SESSION_SECONDS, AuthStore
 from evidex.models import JobStatus, ProjectBrief, Stage
+from evidex.rendering import DocumentRenderer
 from evidex.runner import PipelineRunner
 from evidex.runtime import Settings, make_provider
 from evidex.store import SQLiteStore
@@ -125,10 +126,18 @@ def create_app(settings: Settings | None = None, provider_factory=make_provider)
 
     @app.get("/api/config")
     def config():
+        # Rendering is application code, so a missing PDF font is knowable before any
+        # approved work is spent. Null here means exports will fail at the output stage.
+        renderer = DocumentRenderer(settings.data_dir / "exports", settings.pdf_font)
+        try:
+            pdf_font: str | None = str(renderer.pdf_font())
+        except ValueError:
+            pdf_font = None
         return {
             "demo": settings.demo,
             "configured": settings.demo or bool(settings.llm_key),
             "registration": settings.registration,
+            "pdf_font": pdf_font,
         }
 
     @app.post("/api/auth/register", status_code=201)

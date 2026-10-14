@@ -8,6 +8,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from evidex import rendering
 from evidex.gates import GateContext, source_gate
 from evidex.integrations import CrossrefRetriever, IntegrationError, OpenAIProvider, request_json
 from evidex.models import JobStatus, ResearchPlan, Stage, VerificationStatus
@@ -266,3 +267,104 @@ def test_live_provider_failure_exhausts_attempts_without_fake_fallback(
     assert all(c.provider == "openai-compatible" and "secret" not in c.error for c in errors)
     assert store.get_artifact(job.job_id, Stage.SOURCES, "sources") is None
     provider.close()
+
+
+def _mocked_live_provider(client, renderer):
+    return IntegratedProvider(
+        OpenAIProvider("secret", client=client),
+        CrossrefRetriever(client=client),
+        renderer,
+    )
+
+
+def _mocked_live_handler(fake, seen=None):
+    def handler(request):
+        if seen is not None:
+            seen.append(request)
+        if request.url.host == "api.crossref.org":
+            if request.url.path == "/works":
+                prefix = hashlib.sha256(
+                    request.url.params["query.bibliographic"].encode()
+                ).hexdigest()[:8]
+                return httpx.Response(
+                    200,
+                    json={
+                        "message": {"items": [{"DOI": f"10.1234/{prefix}-{i}"} for i in range(8)]}
+                    },
+                )
+            doi = request.url.path.removeprefix("/works/")
+            return httpx.Response(200, json={"message": metadata(doi)})
+        body = json.loads(request.content)
+        payload = json.loads(body["messages"][1]["content"])["input"]
+        if "sections" in payload:
+            result = fake._review(payload)
+        elif "node" in payload:
+            result = fake._section(payload)
+        elif "registry" in payload:
+            result = fake._outline(payload)
+        else:
+            result = fake._plan(payload)
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(result)}}]})
+
+    return handler
+
+
+def test_render_failure_reports_the_cause_instead_of_an_export_schema_error(
+    brief, store, tmp_path
+):
+    """Regression: a failing renderer was reported as `ExportPackage` schema errors.
+
+    Rendering is application code, so an empty payload was mistaken for model output and
+    the student was told to regenerate a stage no model had produced.
+    """
+    client = httpx.Client(transport=httpx.MockTransport(_mocked_live_handler(FakeLLM())))
+    missing = tmp_path / "no-such-font.ttf"
+    provider = _mocked_live_provider(client, DocumentRenderer(tmp_path / "exports", missing))
+    runner = PipelineRunner(store, provider)
+    job = runner.create_project(brief)
+    for expected in [Stage.PLAN, Stage.SOURCES, Stage.OUTLINE]:
+        state = runner.run(job.job_id)
+        assert state.status == JobStatus.AWAITING_APPROVAL, state.feedback_for_retry
+        runner.approve(job.job_id, expected)
+    state = runner.run(job.job_id)
+
+    assert state.status == JobStatus.NEEDS_HUMAN
+    assert state.current_stage == Stage.OUTPUT
+    feedback = state.feedback_for_retry or ""
+    assert str(missing) in feedback and "EVIDEX_PDF_FONT" in feedback
+    assert "could not run" in feedback
+    # The old behaviour: an empty payload validated as model output, blaming the student.
+    assert "validation error" not in feedback
+    assert "regenerate only this stage" not in feedback
+
+    attempts = [item for item in store.list_attempts(job.job_id) if item["stage"] == "output"]
+    assert all(item["status"] == "provider_error" for item in attempts)
+    assert all(str(missing) in (item["error"] or "") for item in attempts)
+    assert all(item["output"] is None for item in attempts)
+    assert store.get_artifact(job.job_id, Stage.OUTPUT, "output") is None
+    gate = store.get_gate_result(job.job_id, Stage.OUTPUT, "output", 1)
+    assert gate is not None and not gate.passed
+    assert [check.check_id for check in gate.checks] == ["stage_executed"]
+    with pytest.raises(ValueError, match="cannot be overridden"):
+        runner.override_failed_checks(
+            job.job_id, ["stage_executed"], "Renderer was broken; ignore it.", actor="student"
+        )
+    provider.close()
+
+
+def test_configured_font_is_never_second_guessed(tmp_path, monkeypatch):
+    configured = tmp_path / "chosen.ttf"
+    renderer = DocumentRenderer(tmp_path / "exports", configured)
+    with pytest.raises(ValueError, match="chosen.ttf"):
+        renderer.pdf_font()
+    configured.write_bytes(b"placeholder")  # Existence is checked here; fpdf validates content.
+    monkeypatch.setattr(rendering, "PDF_FONT_CANDIDATES", ())
+    assert renderer.pdf_font() == configured
+
+
+def test_font_is_discovered_only_when_no_path_is_configured(tmp_path, monkeypatch):
+    renderer = DocumentRenderer(tmp_path / "exports")
+    assert renderer.pdf_font().is_file()
+    monkeypatch.setattr(rendering, "PDF_FONT_CANDIDATES", (str(tmp_path / "absent.ttf"),))
+    with pytest.raises(ValueError, match="EVIDEX_PDF_FONT"):
+        renderer.pdf_font()

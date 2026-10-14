@@ -23,7 +23,7 @@ class Settings:
     llm_model: str = "gpt-4o-mini"
     llm_base_url: str = "https://api.openai.com/v1"
     crossref_mailto: str = ""
-    pdf_font: str = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+    pdf_font: str = ""  # Empty means "discover an installed Unicode TTF font".
 
     @classmethod
     def from_env(cls):
@@ -36,7 +36,7 @@ class Settings:
             llm_model=os.getenv("EVIDEX_LLM_MODEL", "gpt-4o-mini"),
             llm_base_url=os.getenv("EVIDEX_LLM_BASE_URL", "https://api.openai.com/v1"),
             crossref_mailto=os.getenv("EVIDEX_CROSSREF_MAILTO", ""),
-            pdf_font=os.getenv("EVIDEX_PDF_FONT", cls.pdf_font),
+            pdf_font=os.getenv("EVIDEX_PDF_FONT", ""),
         )
 
 
