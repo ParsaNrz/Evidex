@@ -34,11 +34,95 @@ class IntegrationError(RuntimeError):
     """Safe-to-persist error without credentials or remote response bodies."""
 
 
+# Redirects are followed, but never blindly: a gateway that canonicalises a URL with
+# 307/308 is routine, while one that moves the request to another origin is not.
+REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+MAX_REDIRECTS = 3
+_BODY_KEYWORDS = ("json", "content", "data", "files")
+
+
+def _host_label(url: httpx.URL) -> str:
+    """Origin label for operator-facing errors: never a path or query string.
+
+    A base URL is sometimes configured with a credential in its query string, so error
+    text names only the host, plus the port when it is not the scheme default.
+    """
+    default_port = {"http": 80, "https": 443}.get(url.scheme)
+    host = url.host or ""
+    return f"{host}:{url.port}" if url.port not in (None, default_port) else host
+
+
+def _same_origin(left: httpx.URL, right: httpx.URL) -> bool:
+    return (left.scheme, left.host, left.port) == (right.scheme, right.host, right.port)
+
+
+def _endpoint_label(url: str) -> str:
+    try:
+        return _host_label(httpx.URL(url))
+    except httpx.InvalidURL:
+        return "the configured endpoint"
+
+
+def _redirect_method(method: str, status_code: int) -> str:
+    """301/302/303 drop the body and become GETs; 307/308 repeat the request exactly."""
+    if status_code == 303 or (status_code in (301, 302) and method.upper() != "GET"):
+        return "GET"
+    return method
+
+
+def _send(client: httpx.Client, method: str, url: str, **kwargs: Any) -> httpx.Response:
+    """One logical request, following a bounded number of same-origin HTTPS redirects.
+
+    Gateways answer 307/308 for ordinary URL details: a canonical trailing slash, an
+    ingress rewrite, a moved deployment path. Reporting that as a dead endpoint buried a
+    one-line configuration fix behind an HTTP status, so redirects are followed here —
+    same origin only, HTTPS only, and at most ``MAX_REDIRECTS`` hops. Anything else is
+    refused and names the origin that has to be configured instead, so the payload is
+    never re-sent to a host the administrator did not choose.
+    """
+    try:
+        target = httpx.URL(url)
+    except httpx.InvalidURL:
+        raise IntegrationError("Configured endpoint is not a valid absolute URL") from None
+    for _ in range(MAX_REDIRECTS + 1):
+        response = client.request(method, str(target), **kwargs)
+        if response.status_code not in REDIRECT_STATUSES:
+            return response
+        location = (response.headers.get("location") or "").strip()
+        if not location:
+            raise IntegrationError(
+                f"External service HTTP {response.status_code} at {_host_label(target)} "
+                "without a redirect target"
+            )
+        next_url = target.join(location)
+        if next_url.scheme != "https":
+            raise IntegrationError(
+                f"External service HTTP {response.status_code} at {_host_label(target)} "
+                "redirects to a non-HTTPS address; only HTTPS endpoints are called"
+            )
+        if not _same_origin(target, next_url):
+            raise IntegrationError(
+                f"External service HTTP {response.status_code} at {_host_label(target)} "
+                f"redirects to {_host_label(next_url)}; only same-origin redirects are "
+                "followed, so set the configured base URL to the final endpoint"
+            )
+        redirected = _redirect_method(method, response.status_code)
+        if redirected != method:
+            method = redirected
+            for keyword in _BODY_KEYWORDS:
+                kwargs.pop(keyword, None)
+        target = next_url
+    raise IntegrationError(
+        f"External service at {_host_label(target)} redirected more than "
+        f"{MAX_REDIRECTS} times; set the configured base URL to the final endpoint"
+    )
+
+
 def request_json(client: httpx.Client, method: str, url: str, **kwargs: Any) -> dict:
     # Bounded transport retries; the orchestrator owns stage-level retries.
     for attempt in range(3):
         try:
-            response = client.request(method, url, **kwargs)
+            response = _send(client, method, url, **kwargs)
         except httpx.TransportError:
             if attempt == 2:
                 raise IntegrationError("External service connection/timeout failure") from None
@@ -52,10 +136,14 @@ def request_json(client: httpx.Client, method: str, url: str, **kwargs: Any) -> 
                 except ValueError:
                     raise IntegrationError("External service returned invalid JSON") from None
             if response.status_code != 429 and response.status_code < 500:
-                raise IntegrationError(f"External service HTTP {response.status_code}")
+                raise IntegrationError(
+                    f"External service HTTP {response.status_code} at "
+                    f"{_endpoint_label(url)}; check the configured endpoint and credentials"
+                )
             if attempt == 2:
                 raise IntegrationError(
-                    f"External service HTTP {response.status_code} after retries"
+                    f"External service HTTP {response.status_code} at "
+                    f"{_endpoint_label(url)} after retries"
                 )
         time.sleep(0.5 * (2**attempt))
     raise IntegrationError("External service unavailable")  # pragma: no cover

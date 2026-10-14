@@ -67,6 +67,17 @@ evidex serve --insecure-cookies --host 0.0.0.0 --port 8000   # no --demo: uses t
 
 `evidex serve` prints the config file it loaded and the active mode (`DEMO` or `LIVE`, with the model and endpoint). **`--demo` (or `EVIDEX_DEMO=1`) always wins over an API key**: the synthetic fixture provider is used and the key is ignored (the startup log says so). Mode is stored per project, so projects created in demo mode stay demo; create a new project after switching to live.
 
+If a live stage stops with `… could not run: External service HTTP 307 …`, the configured endpoint answered with a redirect instead of a completion. Gateways usually do this for a URL detail (a canonical trailing slash, an ingress rewrite), and Evidex now follows those: same origin, HTTPS only, at most three hops, with the request body preserved. A redirect to a *different* origin, to plain HTTP, or a longer chain is refused on purpose — the payload is never re-sent to a host you did not configure — and the checkpoint names both hosts. Fix it by pointing `EVIDEX_LLM_BASE_URL` at the final endpoint, then check what the endpoint actually returns:
+
+```bash
+curl -sS -o /dev/null -w '%{http_code} -> %{redirect_url}\n' \
+  -X POST "$EVIDEX_LLM_BASE_URL/chat/completions" \
+  -H "Authorization: Bearer $EVIDEX_LLM_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"'"$EVIDEX_LLM_MODEL"'","messages":[{"role":"user","content":"ping"}]}'
+```
+
+`200`/`401` means the endpoint itself is answering; anything in the `3xx` range means the base URL needs to be the address the gateway redirects to. `401`/`403` means the key or model name, `404` usually a wrong path such as a missing `/v1`, and `429`/`5xx` are retried automatically before the stage pauses for a human.
+
 ### Configuration
 
 | Variable | Default | Purpose |
@@ -75,7 +86,7 @@ evidex serve --insecure-cookies --host 0.0.0.0 --port 8000   # no --demo: uses t
 | `EVIDEX_DEMO` | `0` | Explicit fixture mode when `1`; mode is persisted per project |
 | `EVIDEX_LLM_API_KEY` | unset | Server-side provider secret, required for live execution |
 | `EVIDEX_LLM_MODEL` | `gpt-4o-mini` | JSON-capable model name |
-| `EVIDEX_LLM_BASE_URL` | `https://api.openai.com/v1` | Trusted, administrator-configured HTTPS endpoint |
+| `EVIDEX_LLM_BASE_URL` | `https://api.openai.com/v1` | Trusted, administrator-configured HTTPS endpoint; must be the final endpoint, because only same-origin redirects are followed |
 | `EVIDEX_CROSSREF_MAILTO` | unset | Crossref contact email |
 | `EVIDEX_PDF_FONT` | unset (auto-detect) | Explicit Unicode TTF for embedded PDF text; when unset, common DejaVu/Noto/Vazirmatn/system fonts are searched |
 | `EVIDEX_SECURE_COOKIES` | `1` | Keep enabled for HTTPS; `0` for local HTTP only |
