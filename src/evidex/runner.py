@@ -10,7 +10,13 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
-from evidex.gates import GateContext, evaluate_gate, schema_failure
+from evidex.gates import (
+    EXECUTION_CHECKS,
+    GateContext,
+    evaluate_gate,
+    execution_failure,
+    schema_failure,
+)
 from evidex.models import (
     DocumentOutline,
     ExportPackage,
@@ -236,6 +242,12 @@ class PipelineRunner:
             raise ValueError(
                 "Overrides must name one or more failed check IDs from the latest gate"
             )
+        blocked = sorted(set(check_ids) & EXECUTION_CHECKS)
+        if blocked:
+            raise ValueError(
+                "Execution failures cannot be overridden; the stage produced no output to "
+                "attest. Fix the reported cause and retry the stage instead."
+            )
         if not note.strip():
             raise ValueError("An override requires an audit note")
         overrides = list(state.data.get("overrides", []))
@@ -333,6 +345,7 @@ class PipelineRunner:
         }
         self.store.start_attempt(state.job_id, stage, task_key, attempt, attempt_input)
         persisted_attempt = self.store.get_attempt(state.job_id, stage, task_key, attempt)
+        execution_error: str | None = None
         if persisted_attempt and persisted_attempt["output"] is not None:
             raw_output = persisted_attempt["output"]
         else:
@@ -384,8 +397,9 @@ class PipelineRunner:
                 )
             except (
                 Exception
-            ) as exc:  # Provider failures are persisted and retried via the ordinary gate path.
+            ) as exc:  # Provider/application failures are persisted and retried via the gate path.
                 latency = int((time.perf_counter() - started) * 1000)
+                execution_error = str(exc)
                 call_record = ModelCallRecord(
                     call_id=str(uuid.uuid4()),
                     job_id=state.job_id,
@@ -403,19 +417,25 @@ class PipelineRunner:
                     output_tokens=0,
                     cost_usd=0.0,
                     latency_ms=max(0, latency),
-                    error=str(exc),
+                    error=execution_error,
                 )
                 self.store.save_model_call(call_record)
-                raw_output = {}
                 self.store.finish_attempt(
                     state.job_id,
                     stage,
                     task_key,
                     attempt,
                     status="provider_error",
-                    output=raw_output,
-                    error=str(exc),
+                    output=None,
+                    error=execution_error,
                 )
+        if execution_error is not None:
+            # Nothing was produced. An empty payload must not be stored as an artifact or
+            # validated as model output, and the real cause must survive in the attempt record.
+            gate = execution_failure(stage, execution_error)
+            self.store.save_gate_result(state.job_id, stage, task_key, attempt, gate)
+            self._apply_gate_result(self.store.get_job(state.job_id), gate)
+            return
         self.store.save_artifact(state.job_id, stage, task_key, attempt, raw_output)
         schema = self.SCHEMAS[stage]
         try:

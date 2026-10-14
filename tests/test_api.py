@@ -206,6 +206,17 @@ def test_concurrent_runs_rejected_and_browser_workflow_exports(settings, brief):
         assert client.get(f"/api/projects/{job_id}/downloads/docx").status_code == 404
 
 
+def test_config_reports_pdf_font_readiness_before_any_work_is_spent(settings, tmp_path):
+    configured = settings.data_dir / "custom.ttf"
+    configured.write_bytes(b"placeholder")
+    with TestClient(create_app(replace(settings, pdf_font=str(configured)))) as client:
+        assert client.get("/api/config").json()["pdf_font"] == str(configured)
+    with TestClient(create_app(replace(settings, pdf_font=str(tmp_path / "absent.ttf")))) as client:
+        assert client.get("/api/config").json()["pdf_font"] is None
+    with TestClient(create_app(settings)) as client:
+        assert client.get("/api/config").json()["pdf_font"].endswith(".ttf")
+
+
 def test_ui_assets_are_served_locally_and_no_cors(settings):
     with TestClient(create_app(settings)) as client:
         response = client.get("/")

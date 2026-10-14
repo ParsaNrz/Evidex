@@ -61,6 +61,7 @@ def _result(
     checks: list[tuple[str, bool, str, list[str] | None]],
     *,
     route_to: list[RouteTarget] | None = None,
+    feedback: str | None = None,
 ) -> GateResult:
     check_models = [
         {
@@ -73,8 +74,9 @@ def _result(
         for check_id, passed, details, evidence in checks
     ]
     failed = [item for item in check_models if not item["passed"]]
-    feedback = None
-    if failed:
+    if not failed:
+        feedback = None
+    elif feedback is None:
         feedback = "Fix these failed checks and regenerate only this stage: " + "; ".join(
             f"{item['check_id']}: {item['details']}" for item in failed
         )
@@ -93,6 +95,47 @@ def schema_failure(stage: Stage, error: str) -> GateResult:
         f"{stage.value}.schema",
         stage,
         [("schema_valid", False, f"Output did not match the required schema: {error}", [error])],
+    )
+
+
+# Checks that record whether a stage ran at all. There is no output to attest when one of
+# these fails, so a human override must not be able to waive them.
+EXECUTION_CHECKS = frozenset({"stage_executed"})
+
+
+def summarise_error(error: str, limit: int = 400) -> str:
+    """One-line, bounded rendering of an exception message for gates and UI feedback."""
+    text = " ".join(str(error).split())
+    if len(text) > limit:
+        text = text[: limit - 1].rstrip() + "…"
+    return text or "no error detail was provided"
+
+
+def execution_failure(stage: Stage, error: str) -> GateResult:
+    """A stage that could not run, as opposed to model output that failed validation.
+
+    Live source retrieval, intake normalization, dataset placeholders, and rendering are
+    application-owned, so an exception there must never be reported as a model output that
+    the student can ask the model to regenerate.
+    """
+    detail = summarise_error(error)
+    return _result(
+        f"{stage.value}.execution",
+        stage,
+        [
+            (
+                "stage_executed",
+                False,
+                f"The stage could not run: {detail}",
+                [detail],
+            )
+        ],
+        feedback=(
+            f"{stage.value} could not run: {detail} "
+            "This is an application or provider failure rather than generated text, so this "
+            "attempt produced no model output and regenerating the stage cannot change the "
+            "result. Correct the reported cause, then retry."
+        ),
     )
 
 

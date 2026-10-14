@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from evidex.models import (
     CitationStyle,
     DataSituation,
@@ -10,7 +12,7 @@ from evidex.models import (
     ProjectBrief,
     Stage,
 )
-from evidex.providers import FakeLLM
+from evidex.providers import FakeLLM, LLMResponse
 from evidex.runner import PipelineConfig, PipelineRunner
 from evidex.store import SQLiteStore
 
@@ -230,3 +232,71 @@ def test_cancel_is_terminal(store):
     cancelled = runner.cancel(job.job_id)
     assert cancelled.status == JobStatus.CANCELLED
     assert runner.run(job.job_id).status == JobStatus.CANCELLED
+
+
+class ApplicationFailure(FakeLLM):
+    """Fixture generator whose chosen stage fails like application code, not like model text."""
+
+    def __init__(self, stage: Stage, error: str):
+        super().__init__()
+        self.stage, self.error, self.failing = stage, error, True
+
+    def complete_json(self, request):
+        if request.stage == self.stage and self.failing:
+            self.calls.append(request)
+            raise RuntimeError(self.error)
+        return super().complete_json(request)
+
+
+def test_application_failure_is_reported_as_execution_and_recovers_after_a_retry(store):
+    provider = ApplicationFailure(Stage.OUTPUT, "Renderer crashed: disk full\ndevice offline")
+    runner = PipelineRunner(store, provider)
+    job = runner.create_project(make_brief())
+    state = approve_all_until_terminal(runner, job.job_id)
+
+    assert state.status == JobStatus.NEEDS_HUMAN
+    assert state.current_stage == Stage.OUTPUT
+    feedback = state.feedback_for_retry or ""
+    assert "Renderer crashed: disk full device offline" in feedback  # whitespace collapsed
+    assert "application or provider failure" in feedback
+    assert "validation error" not in feedback
+    assert "regenerate only this stage" not in feedback
+
+    attempts = [item for item in store.list_attempts(job.job_id) if item["stage"] == "output"]
+    assert [item["status"] for item in attempts] == ["provider_error", "provider_error"]
+    assert all("disk full" in item["error"] for item in attempts)
+    assert all(item["output"] is None for item in attempts)
+    assert store.get_artifact(job.job_id, Stage.OUTPUT, "output") is None
+    gate = store.get_gate_result(job.job_id, Stage.OUTPUT, "output", 1)
+    assert gate is not None and not gate.passed
+    assert [(check.check_id, check.passed) for check in gate.checks] == [("stage_executed", False)]
+
+    with pytest.raises(ValueError, match="cannot be overridden"):
+        runner.override_failed_checks(job.job_id, ["stage_executed"], "Ignore the crash.")
+
+    # Once the environment is fixed, the paused stage can be retried without redoing approvals.
+    provider.failing = False
+    state = runner.request_retry(job.job_id, "Disk space freed", actor="student")
+    state = runner.run(job.job_id)
+    assert state.status == JobStatus.COMPLETED
+    package = store.get_artifact(job.job_id, Stage.OUTPUT, "output")
+    assert package["demo_mode"] is True and package["audit_complete"] is True
+
+
+def test_genuine_schema_failures_are_still_reported_as_schema_failures(store):
+    class EmptyOutput(FakeLLM):
+        def complete_json(self, request):
+            if request.stage == Stage.PLAN:
+                self.calls.append(request)
+                return LLMResponse({}, self.name, self.model, 1, 1, 0, 0.0)
+            return super().complete_json(request)
+
+    runner = PipelineRunner(store, EmptyOutput())
+    job = runner.create_project(make_brief())
+    state = runner.run(job.job_id)
+
+    assert state.status == JobStatus.NEEDS_HUMAN
+    assert "schema_valid" in (state.feedback_for_retry or "")
+    assert "regenerate only this stage" in (state.feedback_for_retry or "")
+    attempts = [item for item in store.list_attempts(job.job_id) if item["stage"] == "plan"]
+    assert all(item["status"] == "schema_failed" for item in attempts)

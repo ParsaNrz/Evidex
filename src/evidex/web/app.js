@@ -38,6 +38,8 @@ const labels = {
     live: "Live integrations",
     unconfigured:
       "Live mode is not configured. Set EVIDEX_LLM_API_KEY on the server to begin.",
+    noFont:
+      "PDF export is unavailable: no Unicode font was found on the server. Install fonts-dejavu-core (Debian/Ubuntu) or set EVIDEX_PDF_FONT to an installed .ttf file. Until then the pipeline stops at the export stage.",
     footer: "Built on evidence. Guided by you.",
     footerRight: "Plan → Sources → Outline → Draft → Review",
     authTitle: "A clearer path from question to knowledge.",
@@ -177,6 +179,8 @@ const labels = {
     live: "اتصال به خدمات واقعی",
     unconfigured:
       "حالت واقعی تنظیم نشده است. کلید EVIDEX_LLM_API_KEY را در سرور تنظیم کنید.",
+    noFont:
+      "خروجی PDF در دسترس نیست: فونت یونیکد روی سرور پیدا نشد. بسته fonts-dejavu-core را نصب کنید یا متغیر EVIDEX_PDF_FONT را به یک فایل .ttf نصب‌شده اشاره دهید. تا آن زمان، اجرای مراحل در مرحله خروجی متوقف می‌شود.",
     footer: "بر پایه شواهد. با راهبری شما.",
     footerRight: "طرح ← منابع ← ساختار ← نگارش ← بازبینی",
     authTitle: "مسیری روشن‌تر از پرسش به دانش.",
@@ -352,11 +356,13 @@ function modeBadge() {
   return `<span class="pill"><span class="dot"></span>${t(config.demo ? "demo" : "live")}</span>`;
 }
 function banner(demo = config.demo) {
-  return demo
+  const mode = demo
     ? `<div class="banner"><strong>◈ ${t("demo")}</strong><span>${t("demoText")}</span></div>`
     : !config.configured
       ? `<div class="banner">${t("unconfigured")}</div>`
       : "";
+  const font = config.pdf_font === null ? `<div class="banner">${t("noFont")}</div>` : "";
+  return mode + font;
 }
 function languageButton() {
   return `<button data-language class="text-btn" aria-label="Change language">${lang === "en" ? "فارسی" : "English"}</button>`;

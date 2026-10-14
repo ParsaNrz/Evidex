@@ -22,7 +22,9 @@ Python 3.11+ is the baseline. The UI intentionally has no frontend build depende
 
 ## Workflow/control boundary
 
-The ordered stages remain **intake → plan → sources → outline → writing → review → output**. Plan, sources, and outline pause for authenticated human approval. Rejecting an artifact pauses it for feedback and a human retry. Gate failures persist before retrying; exhaustion yields `NEEDS_HUMAN`. The model never picks the next stage, approves a checkpoint, overrides a check, creates files, or assigns verification status.
+The ordered stages remain **intake → plan → sources → outline → writing → review → output**. Plan, sources, and outline pause for authenticated human approval. Rejecting an artifact pauses it for feedback and a human retry. Gate failures persist before retrying; exhaustion yields `NEEDS_HUMAN`.
+
+Gate failures distinguish *model output that failed validation* from *a stage that could not run*. A schema failure (`schema_valid`, gate `<stage>.schema`) quotes the validator errors and asks for a regenerated stage. When application code or the provider raises (rendering, retrieval, a rejected HTTP call), no payload exists to validate: the runner records the attempt as `provider_error` with the real message, saves no artifact, and fails the `stage_executed` check (gate `<stage>.execution`) with that cause. Execution failures cannot be waived by a human override because there is nothing to attest, and the retry feedback never asks the student to regenerate model text that was never produced. The model never picks the next stage, approves a checkpoint, overrides a check, creates files, or assigns verification status.
 
 Writing runs one outline node at a time. Review findings route through the existing code-owned section retry mechanism. Results/findings without an uploaded dataset are code-generated placeholders in live mode, including when the brief says the student has data. There is no upload implementation yet.
 
@@ -65,13 +67,13 @@ Cancellation currently requires the run lock to be free. It does not interrupt a
 The renderer consumes ordered, reviewed sections, the approved registry, and recorded overrides. It resolves only audited citation IDs, builds draft references and per-source claim/note mappings, and creates:
 
 - DOCX via `python-docx`, with paragraph/run RTL properties and Unicode font selection.
-- PDF via `fpdf2`, an embedded Unicode font, and HarfBuzz shaping.
+- PDF via `fpdf2`, an embedded Unicode font, and HarfBuzz shaping. `EVIDEX_PDF_FONT` names the font explicitly; otherwise an installed DejaVu/Noto/Vazirmatn/system font is discovered, and `GET /api/config` reports the resolved path (or `null`) so a missing font is visible before export work is approved.
 - JSON with the citation audit, registry, sections, review, disclosure, and overrides.
 
 Temporary files are rendered inside a job-specific directory, then atomically replaced individually. Incomplete attempts cannot be downloaded through the API. File sizes come from disk, never model assertions. Live output must include a disclosure and both document formats; the gate checks metadata and audit completeness. Documents are drafts: exact CSL style compliance, automatic TOC, university layouts, and DOCX/PDF pagination parity remain future work.
 
 ## Tests and deployment boundaries
 
-The original core tests remain. Additional tests cover OpenAI request/schema/usage/error contracts, Crossref normalization/missing evidence/retraction behavior, mocked live end-to-end output, actual DOCX opening/PDF parsing (English and Persian), account isolation, session revocation/expiry, CSRF, login throttling, concurrent-run rejection, approval/download workflow, and path confinement. No test needs live credentials or live scholarly content. Manual browser smoke checks cover account creation, all three approvals, exports, and RTL mobile layout.
+The original core tests remain. Additional tests cover OpenAI request/schema/usage/error contracts, Crossref normalization/missing evidence/retraction behavior, mocked live end-to-end output, a render failure surfacing its cause instead of an `ExportPackage` schema error, font discovery/override behavior, actual DOCX opening/PDF parsing (English and Persian), account isolation, session revocation/expiry, CSRF, login throttling, concurrent-run rejection, approval/download workflow, and path confinement. No test needs live credentials or live scholarly content. Manual browser smoke checks cover account creation, all three approvals, exports, and RTL mobile layout.
 
 Before a public service, implement global token/cost budgets, stronger semantic/evidence checking, verified identities/recovery/MFA, durable distributed queues, backups/deletion/retention, monitoring, and production storage. Do not describe the current system as verified academic correctness or production-hardened SaaS.

@@ -15,7 +15,7 @@ This is a **local/small-deployment implementation**, not a fully hardened public
 
 ## Install
 
-Python 3.11+ is required. PDF rendering also needs a Unicode TTF font with Persian glyphs; DejaVu Sans is used by default.
+Python 3.11+ is required. PDF rendering also needs a Unicode TTF font with Persian glyphs; an installed font (DejaVu Sans, Noto Arabic, Vazirmatn, system Arial/Tahoma) is discovered automatically unless `EVIDEX_PDF_FONT` names one.
 
 ```bash
 python -m venv .venv
@@ -25,7 +25,7 @@ pytest
 ruff check src tests
 ```
 
-Windows: activate with `.venv\Scripts\activate`. On Debian/Ubuntu, install `fonts-dejavu-core` if `/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf` is absent. On other systems set `EVIDEX_PDF_FONT` to an installed Unicode `.ttf` font. HarfBuzz text shaping is provided by the Python dependency `uharfbuzz`; no LibreOffice or external PDF service is required.
+Windows: activate with `.venv\Scripts\activate`. On Debian/Ubuntu, install `fonts-dejavu-core` (the CI workflow does this) if no Unicode font is present. `GET /api/config` reports the resolved `pdf_font` and the workspace warns when none is available, because rendering fails at the export stage without one. Set `EVIDEX_PDF_FONT` to an installed Unicode `.ttf` file to choose a specific font; an explicitly configured path is never silently replaced. HarfBuzz text shaping is provided by the Python dependency `uharfbuzz`; no LibreOffice or external PDF service is required.
 
 ## Start the web workspace
 
@@ -74,7 +74,7 @@ uvicorn evidex.api:create_app --factory --env-file .env --host 0.0.0.0 --port 80
 | `EVIDEX_LLM_MODEL` | `gpt-4o-mini` | JSON-capable model name |
 | `EVIDEX_LLM_BASE_URL` | `https://api.openai.com/v1` | Trusted, administrator-configured HTTPS endpoint |
 | `EVIDEX_CROSSREF_MAILTO` | unset | Crossref contact email |
-| `EVIDEX_PDF_FONT` | `/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf` | Unicode TTF for embedded PDF text |
+| `EVIDEX_PDF_FONT` | unset (auto-detect) | Explicit Unicode TTF for embedded PDF text; when unset, common DejaVu/Noto/Vazirmatn/system fonts are searched |
 | `EVIDEX_SECURE_COOKIES` | `1` | Keep enabled for HTTPS; `0` for local HTTP only |
 | `EVIDEX_REGISTRATION` | `1` | Set `0` to disable new accounts after provisioning trusted users |
 
@@ -119,6 +119,7 @@ These commands accept `--database PATH`. `run` detects persisted live-mode jobs 
 - Retrieval retries repeat searches from the approved plan. There is not yet a manual source editor, upload/DOI import flow, full-text retrieval, or additional scholarly-provider fallback. `user_provided_sources` and university-specific templates in the domain schema are not consumed by these integrations.
 - Existing deterministic claim/number/citation gates remain intact, but lexical overlap is **not** a semantic entailment or plagiarism judge. Read every generated section. No automatic correctness guarantee is made.
 - There is no dataset upload yet. Live original-results/findings sections use code-generated `STUDENT_DATA` placeholders even if intake says `has_data`.
+- Stage failures are reported by cause. Retrieval, intake normalization, dataset placeholders, and rendering are application code; when one of them raises, the checkpoint shows the underlying error (for example a missing font path) and states that no model output exists to regenerate. These `stage_executed` failures cannot be waived with a human override — fix the cause and retry the stage. Model-output schema failures (`schema_valid`) are reported separately.
 - DOCX/PDF exports are usable drafts, not certified APA/IEEE/Vancouver/CSL formatting. They do not yet implement university templates, automatic TOC, LaTeX, BibTeX/RIS, or exact pagination parity. PDF embeds the configured font; DOCX requests DejaVu Sans and the viewing system may substitute it.
 - Live prompts transmit the brief, approved sources, draft sections, and feedback to the configured LLM service; retrieval transmits topic/subtopic searches to Crossref. Assess provider data-retention/privacy terms before using sensitive research.
 - Before public multi-user deployment: add verified-email/password-reset/MFA flows, operational monitoring, backup/retention/deletion policy, global token/cost budgets, edge rate/body limits, PostgreSQL, and a durable distributed worker queue. Current limits constrain requests/attempts but do not enforce a dollar budget. Protect the data directory and backups; the local DB/files are not encrypted by this application. Disable open registration for a trusted-user deployment.
