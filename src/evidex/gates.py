@@ -673,7 +673,11 @@ def output_gate(
         for claim in section.claims:
             for source_id in claim.source_ids:
                 claims_by_source.setdefault(source_id, []).append(claim.claim_id)
-                notes_by_source.setdefault(source_id, []).extend(claim.evidence_note_ids)
+                notes_by_source.setdefault(source_id, []).extend(
+                    note_id for note_id in claim.evidence_note_ids
+                    if source_id in source_map
+                    and note_id in {note.note_id for note in source_map[source_id].notes}
+                )
     audit_map = {entry.source_id: entry for entry in package.citation_audit}
     audit_ids_match_citations = set(audit_map) == set(claims_by_source) and len(audit_map) == len(
         package.citation_audit
@@ -728,6 +732,12 @@ def output_gate(
             file_records_ok,
             "A production package must contain non-empty DOCX and PDF files; fixture runs are clearly marked demo-only.",
             [file.format for file in package.files],
+        ),
+        (
+            "ai_use_disclosure",
+            context.fixture_mode or bool(package.ai_use_disclosure and package.ai_use_disclosure.strip()),
+            "Live exports must disclose AI assistance.",
+            None,
         ),
         (
             "export_paths_unique",

@@ -83,7 +83,7 @@ class PromptRegistry:
 
     def __init__(self, prompt_dir: str | Path | None = None) -> None:
         self.prompt_dir = (
-            Path(prompt_dir) if prompt_dir else Path(__file__).resolve().parents[2] / "prompts"
+            Path(prompt_dir) if prompt_dir else Path(__file__).resolve().parent / "prompts"
         )
 
     def load(self, stage: Stage) -> Prompt:
@@ -373,7 +373,10 @@ class FakeLLM:
             for claim in section.claims:
                 for source_id in claim.source_ids:
                     claims_by_source.setdefault(source_id, []).append(claim.claim_id)
-                    notes_by_source.setdefault(source_id, []).extend(claim.evidence_note_ids)
+                    notes_by_source.setdefault(source_id, []).extend(
+                        note_id for note_id in claim.evidence_note_ids
+                        if note_id in {note.note_id for note in source_map[source_id].notes}
+                    )
         audit = [
             CitationAuditEntry(
                 source_id=source_id,

@@ -149,8 +149,10 @@ class SQLiteStore:
                 if connection is not self._memory_connection:
                     connection.close()
 
-    def create_job(self, brief: ProjectBrief, job_id: str) -> JobState:
-        state = JobState(job_id=job_id)
+    def create_job(
+        self, brief: ProjectBrief, job_id: str, *, data: dict[str, Any] | None = None
+    ) -> JobState:
+        state = JobState(job_id=job_id, data=data or {})
         now = _iso(state.created_at)
         with self._lock:
             connection = self._connect()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 from evidex.models import (
@@ -99,7 +100,15 @@ def _demo(args: argparse.Namespace) -> int:
 def _run(args: argparse.Namespace) -> int:
     store = _database(args.database)
     try:
-        state = PipelineRunner(store).run(args.job_id)
+        from evidex.runtime import Settings, make_provider
+
+        mode = store.get_job(args.job_id).data.get("execution_mode", "demo")
+        provider = make_provider(Settings.from_env(), demo=False) if mode == "live" else FakeLLM()
+        try:
+            state = PipelineRunner(store, provider).run(args.job_id)
+        finally:
+            if hasattr(provider, "close"):
+                provider.close()
         _print(state)
         return 0
     finally:
@@ -144,11 +153,31 @@ def _status(args: argparse.Namespace) -> int:
         store.close()
 
 
+def _serve(args: argparse.Namespace) -> int:
+    import uvicorn
+
+    if args.demo:
+        os.environ["EVIDEX_DEMO"] = "1"
+    if args.insecure_cookies:
+        os.environ["EVIDEX_SECURE_COOKIES"] = "0"
+    uvicorn.run("evidex.api:create_app", factory=True, host=args.host, port=args.port)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="evidex", description="Auditable academic-writing pipeline"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    serve = subparsers.add_parser("serve", help="Start the authenticated web workspace and API")
+    serve.add_argument("--host", default="0.0.0.0")
+    serve.add_argument("--port", type=int, default=8000)
+    serve.add_argument("--demo", action="store_true", help="Use visibly synthetic fixtures")
+    serve.add_argument(
+        "--insecure-cookies", action="store_true", help="Local HTTP only; never public"
+    )
+    serve.set_defaults(func=_serve)
 
     demo = subparsers.add_parser("demo", help="Run the synthetic fixture pipeline")
     demo.add_argument("--database", default=".evidex/evidex.sqlite3")

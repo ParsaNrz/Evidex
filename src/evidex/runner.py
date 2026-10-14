@@ -82,10 +82,15 @@ class PipelineRunner:
         self.config = config or PipelineConfig()
 
     def create_project(self, brief: ProjectBrief, job_id: str | None = None) -> JobState:
-        return self.store.create_job(brief, job_id or str(uuid.uuid4()))
+        return self.store.create_job(brief, job_id or str(uuid.uuid4()), data={
+            "execution_mode": "demo" if self.provider.fixture_mode else "live"
+        })
 
     def run(self, job_id: str, *, max_steps: int | None = None) -> JobState:
         state = self.store.get_job(job_id)
+        mode = "demo" if self.provider.fixture_mode else "live"
+        if state.data.get("execution_mode", "demo") != mode:
+            raise ValueError("Execution mode mismatch: refusing to mix real sources and fixtures")
         if state.status in {
             JobStatus.AWAITING_APPROVAL,
             JobStatus.NEEDS_HUMAN,
