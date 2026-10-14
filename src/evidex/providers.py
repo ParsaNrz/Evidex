@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import itertools
 import json
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -30,6 +33,91 @@ from evidex.models import (
     VerificationStatus,
 )
 from evidex.templates import distribute_words, document_template, section_id
+
+_FILLER_OPENERS_EN = (
+    "Within the approved scope,",
+    "From the standpoint of the research plan,",
+    "At this stage of the document,",
+    "For the purposes of this section,",
+    "Consistent with the stated method,",
+    "In keeping with the agreed objectives,",
+    "As the outline specifies,",
+    "Given the current evidence base,",
+)
+_FILLER_BODIES_EN = (
+    "the discussion of {focus} stays limited to what the registered sources support",
+    "{focus} is treated as a matter for careful, evidence-bound description",
+    "any statement about {focus} must be traceable to an evidence note",
+    "the treatment of {focus} flags uncertainty instead of filling gaps",
+    "{focus} is addressed without adding results, figures, or sources of its own",
+    "the reader should see where evidence for {focus} ends and interpretation begins",
+)
+_FILLER_CLOSERS_EN = (
+    "and the wording remains provisional until review",
+    "and no claim goes beyond the cited note",
+    "so that the draft can be checked line by line",
+    "while leaving room for the student's own analysis",
+    "and open questions are named rather than hidden",
+)
+_FILLER_OPENERS_FA = (
+    "در چارچوب دامنه مصوب،",
+    "از منظر طرح پژوهش،",
+    "در این مرحله از سند،",
+    "برای مقاصد این بخش،",
+    "مطابق با روش اعلام‌شده،",
+    "با توجه به هدف‌های توافق‌شده،",
+    "بر اساس آنچه طرح کلی مشخص کرده،",
+    "با تکیه بر پایه شواهد کنونی،",
+)
+_FILLER_BODIES_FA = (
+    "بحث درباره {focus} به آنچه منابع ثبت‌شده پشتیبانی می‌کنند محدود می‌ماند",
+    "{focus} با توصیفی محتاطانه و مبتنی بر شواهد بررسی می‌شود",
+    "هر گزاره درباره {focus} باید به یک یادداشت شاهد قابل ردیابی باشد",
+    "در پرداختن به {focus} عدم قطعیت نشان داده می‌شود و خلأها پر نمی‌شوند",
+    "{focus} بدون افزودن نتیجه، عدد یا منبع تازه مطرح می‌شود",
+    "خواننده باید ببیند شواهد مربوط به {focus} کجا پایان می‌یابد و تفسیر از کجا آغاز می‌شود",
+)
+_FILLER_CLOSERS_FA = (
+    "و عبارت‌بندی تا زمان داوری موقتی می‌ماند",
+    "و هیچ ادعایی از یادداشت ارجاع‌شده فراتر نمی‌رود",
+    "تا پیش‌نویس سطر به سطر قابل بررسی باشد",
+    "و برای تحلیل خود دانشجو جا باقی می‌ماند",
+    "و پرسش‌های باز نام برده می‌شوند نه پنهان",
+)
+
+
+def _as_sentence(text: str) -> str:
+    text = text.strip()
+    return text if text.endswith((".", "!", "?", "؟")) else text + "."
+
+
+def _short(text: str, limit: int = 8) -> str:
+    words = text.strip().rstrip(".!?؟…:;,").split()
+    return " ".join(words[:limit])
+
+
+def _demo_filler_sentences(brief: ProjectBrief, node: OutlineNode) -> Iterator[str]:
+    """Yield distinct placeholder sentences for the synthetic demo writer.
+
+    Every sentence differs from every other one, so the demo draft never repeats a
+    line. Combinations are ordered by a stable hash so parts are mixed but the output
+    stays deterministic.
+    """
+    persian = brief.language == Language.PERSIAN
+    openers = _FILLER_OPENERS_FA if persian else _FILLER_OPENERS_EN
+    bodies = _FILLER_BODIES_FA if persian else _FILLER_BODIES_EN
+    closers = _FILLER_CLOSERS_FA if persian else _FILLER_CLOSERS_EN
+    foci: list[str] = []
+    for candidate in (node.title, brief.topic, brief.field):
+        focus = _short(candidate)
+        if focus and focus not in foci:
+            foci.append(focus)
+    combos = sorted(
+        itertools.product(openers, bodies, closers, foci),
+        key=lambda combo: hashlib.sha256("|".join(combo).encode("utf-8")).hexdigest(),
+    )
+    for opener, body, closer, focus in combos:
+        yield f"{opener} {body.format(focus=focus)} {closer}."
 
 
 @dataclass(frozen=True)
@@ -322,13 +410,18 @@ class FakeLLM:
         source = source_map[source_id]
         note = source.notes[0]
         claim_text = note.paraphrase
-        if brief.language == Language.PERSIAN:
-            filler = "این بخش در چارچوب مسئله، هدف‌ها و روش مصوب توضیح داده می‌شود"
-        else:
-            filler = "This section stays within the approved scope, objectives, and method"
-        text_parts = [claim_text]
-        while len(" ".join(text_parts).split()) < max(1, int(node.word_budget * 0.92)):
-            text_parts.append(filler)
+        text_parts = [_as_sentence(claim_text)]
+        used = len(claim_text.split())
+        floor = max(1, int(node.word_budget * 0.92))
+        ceiling = max(floor, int(node.word_budget * 1.08))
+        for sentence in _demo_filler_sentences(brief, node):
+            if used >= floor:
+                break
+            length = len(sentence.split())
+            if used + length > ceiling:
+                continue
+            text_parts.append(sentence)
+            used += length
         body = " ".join(text_parts) + f" [@{source_id}]"
         return SectionDraft(
             section_id=node.node_id,

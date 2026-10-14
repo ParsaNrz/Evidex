@@ -58,11 +58,14 @@ Use an HTTPS reverse proxy. For local HTTP testing only, append `--insecure-cook
 
 Crossref currently needs no API key; a contact email is recommended. The server needs outbound HTTPS to `api.crossref.org` and the configured LLM host. No credentials are sent to the browser. The live adapter tests use HTTP mocks; tests do not require a network or spend API credits. Live calls still require validation in your provider/network environment.
 
-Copy `.env.example` for reference. **The app reads process environment variables; it does not automatically load `.env` files.** Uvicorn's `--env-file .env` is an alternative:
+Instead of exporting variables, copy `.env.example` to `.env` in the directory you start Evidex from and fill it in. **`evidex` (all subcommands) loads `.env` automatically**, and `uvicorn evidex.api:create_app --factory` does too. Variables already set in your shell take precedence over the file, and `EVIDEX_ENV_FILE=/path/to/file` selects a different file. `.env` is git-ignored; never commit it.
 
 ```bash
-uvicorn evidex.api:create_app --factory --env-file .env --host 0.0.0.0 --port 8000
+cp .env.example .env      # set EVIDEX_LLM_API_KEY, model, and base URL
+evidex serve --insecure-cookies --host 0.0.0.0 --port 8000   # no --demo: uses the LLM from .env
 ```
+
+`evidex serve` prints the config file it loaded and the active mode (`DEMO` or `LIVE`, with the model and endpoint). **`--demo` (or `EVIDEX_DEMO=1`) always wins over an API key**: the synthetic fixture provider is used and the key is ignored (the startup log says so). Mode is stored per project, so projects created in demo mode stay demo; create a new project after switching to live.
 
 ### Configuration
 

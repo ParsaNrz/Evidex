@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -11,6 +12,41 @@ from evidex.integrations import CrossrefRetriever, OpenAIProvider
 from evidex.models import Language, OutlineNode, ProjectBrief, ResearchPlan, SectionDraft, Stage
 from evidex.providers import FakeLLM, LLMRequest, LLMResponse
 from evidex.rendering import DocumentRenderer
+
+
+def _parse_env_line(line: str) -> tuple[str, str] | None:
+    line = line.strip()
+    if not line or line.startswith("#"):
+        return None
+    if line.startswith("export "):
+        line = line[len("export ") :].lstrip()
+    key, sep, value = line.partition("=")
+    key, value = key.strip(), value.strip()
+    if not sep or not key.replace("_", "").isalnum():
+        return None
+    if value[:1] in {'"', "'"}:
+        end = value.find(value[0], 1)
+        value = value[1:end] if end != -1 else value[1:]
+    else:
+        value = re.split(r"\s+#", value, maxsplit=1)[0].strip()
+    return key, value
+
+
+def load_env_file(path: str | Path | None = None) -> Path | None:
+    """Load KEY=VALUE pairs from a ``.env`` file into ``os.environ``.
+
+    Variables already present in the environment always win, so shell exports and
+    deployment settings override the file. ``EVIDEX_ENV_FILE`` selects another file.
+    Returns the loaded path, or ``None`` if there is no file.
+    """
+    env_path = Path(path or os.getenv("EVIDEX_ENV_FILE") or ".env").expanduser()
+    if not env_path.is_file():
+        return None
+    for line in env_path.read_text(encoding="utf-8-sig").splitlines():
+        parsed = _parse_env_line(line)
+        if parsed and parsed[0] not in os.environ:
+            os.environ[parsed[0]] = parsed[1]
+    return env_path
 
 
 @dataclass(frozen=True)
@@ -26,10 +62,12 @@ class Settings:
     pdf_font: str = ""  # Empty means "discover an installed Unicode TTF font".
 
     @classmethod
-    def from_env(cls):
+    def from_env(cls, *, load_dotenv: bool = True):
+        if load_dotenv:
+            load_env_file()
         return cls(
             data_dir=Path(os.getenv("EVIDEX_DATA_DIR", ".evidex")),
-            demo=os.getenv("EVIDEX_DEMO", "0") == "1",
+            demo=os.getenv("EVIDEX_DEMO", "0").strip() == "1",
             secure_cookies=os.getenv("EVIDEX_SECURE_COOKIES", "1") == "1",
             registration=os.getenv("EVIDEX_REGISTRATION", "1") == "1",
             llm_key=os.getenv("EVIDEX_LLM_API_KEY", ""),
