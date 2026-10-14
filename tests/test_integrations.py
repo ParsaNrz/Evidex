@@ -10,7 +10,13 @@ import pytest
 
 from evidex import rendering
 from evidex.gates import GateContext, source_gate
-from evidex.integrations import CrossrefRetriever, IntegrationError, OpenAIProvider, request_json
+from evidex.integrations import (
+    MAX_REDIRECTS,
+    CrossrefRetriever,
+    IntegrationError,
+    OpenAIProvider,
+    request_json,
+)
 from evidex.models import JobStatus, ResearchPlan, Stage, VerificationStatus
 from evidex.providers import FakeLLM, LLMRequest, PromptRegistry
 from evidex.rendering import DocumentRenderer
@@ -92,10 +98,13 @@ def test_network_retries_are_bounded_and_errors_do_not_leak_secrets(monkeypatch)
         return httpx.Response(429, text="secret-provider-response")
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        with pytest.raises(IntegrationError, match="429 after retries") as error:
+        with pytest.raises(IntegrationError, match="HTTP 429 at example.test after retries"):
             request_json(client, "GET", "https://example.test")
+        with pytest.raises(IntegrationError) as error:
+            request_json(client, "GET", "https://example.test/v1?api_key=secret-token")
         assert "secret" not in str(error.value)
-    assert len(calls) == 3
+        assert "example.test" in str(error.value)
+    assert len(calls) == 6
 
 
 def test_auth_failure_is_not_retried(monkeypatch):
@@ -108,6 +117,115 @@ def test_auth_failure_is_not_retried(monkeypatch):
         with pytest.raises(IntegrationError, match="HTTP 401"):
             request_json(client, "GET", "https://example.test")
     assert len(calls) == 1
+
+
+def test_llm_redirect_to_canonical_url_is_followed(brief):
+    """Regression: a gateway 307 on the chat-completions path killed the plan stage.
+
+    The endpoint answered "use /v1/chat/completions/ instead"; that is a URL detail, not a
+    provider outage, so the request is replayed once and the stage still runs.
+    """
+    output = FakeLLM()._plan({"brief": brief.model_dump(mode="json")})
+    seen = []
+
+    def handler(request):
+        seen.append(
+            (
+                request.method,
+                str(request.url),
+                request.headers.get("Authorization"),
+                request.content,
+            )
+        )
+        if request.url.path == "/v1/chat/completions":
+            return httpx.Response(307, headers={"Location": "/v1/chat/completions/"})
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(output)}}]})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        response = OpenAIProvider(
+            "test-secret", base_url="https://llm.example/v1", client=client
+        ).complete_json(llm_request(brief))
+    assert response.output == output
+    assert [(method, url) for method, url, _, _ in seen] == [
+        ("POST", "https://llm.example/v1/chat/completions"),
+        ("POST", "https://llm.example/v1/chat/completions/"),
+    ]
+    # 307 preserves method and body; the origin is unchanged, so the key is replayed.
+    assert seen[0][3] == seen[1][3] and seen[0][3]
+    assert {auth for _, _, auth, _ in seen} == {"Bearer test-secret"}
+
+
+def test_redirect_to_another_origin_is_refused_and_the_payload_is_not_resent(brief):
+    seen = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        return httpx.Response(
+            307, headers={"Location": "https://elsewhere.example/v1/chat/completions"}
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(IntegrationError, match="redirects to elsewhere.example") as error:
+            OpenAIProvider(
+                "test-secret", base_url="https://llm.example/v1", client=client
+            ).complete_json(llm_request(brief))
+    assert "base URL" in str(error.value)
+    assert seen == ["https://llm.example/v1/chat/completions"]  # Never followed, never retried.
+
+
+def test_base_url_without_the_api_path_is_reported_as_a_configuration_error(brief):
+    """A gateway site root instead of its API path redirects to its own login page.
+
+    Evidex must not call that a provider outage, and must never POST the brief and the API
+    key to a login form: the redirect is followed as a bodyless GET, the HTML answer is
+    recognised, and the checkpoint names the base URL as the thing to fix.
+    """
+    seen = []
+
+    def handler(request):
+        seen.append((request.method, str(request.url)))
+        if request.url.path == "/chat/completions":
+            return httpx.Response(302, headers={"Location": "/login?next=%2Fchat%2Fcompletions"})
+        return httpx.Response(
+            200, headers={"Content-Type": "text/html"}, text="<html>Sign in</html>"
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(IntegrationError, match="HTML page") as error:
+            OpenAIProvider(
+                "thk_live_secret", base_url="https://gateway.example", client=client
+            ).complete_json(llm_request(brief))
+    assert "base URL" in str(error.value)
+    assert "secret" not in str(error.value)
+    assert seen == [
+        ("POST", "https://gateway.example/chat/completions"),
+        ("GET", "https://gateway.example/login?next=%2Fchat%2Fcompletions"),
+    ]
+
+
+def test_non_https_redirect_target_is_refused():
+    with httpx.Client(
+        transport=httpx.MockTransport(
+            lambda r: httpx.Response(302, headers={"Location": "http://llm.example/v1/"})
+        )
+    ) as client:
+        with pytest.raises(IntegrationError, match="non-HTTPS"):
+            request_json(client, "GET", "https://llm.example/v1/models")
+
+
+def test_redirect_loop_is_bounded_and_names_the_endpoint():
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(307, headers={"Location": "/v1/chat/completions"})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(IntegrationError, match="at llm.example redirected more than 3 times"):
+            request_json(
+                client, "POST", "https://llm.example/v1/chat/completions", json={"prompt": "hi"}
+            )
+    assert len(calls) == MAX_REDIRECTS + 1
 
 
 def test_crossref_never_invents_evidence_and_flags_retractions():
@@ -202,6 +320,67 @@ def test_mocked_live_pipeline_retrieves_real_shaped_records_and_renders(brief, s
     assert len(registry["sources"]) == 15
     assert all(s["origin"] == "api" for s in registry["sources"])
     assert any(r.url.host == "api.crossref.org" for r in seen)
+    provider.close()
+
+
+def test_same_origin_redirect_does_not_stop_the_plan_stage(brief, store, tmp_path):
+    """The reported failure: `plan could not run: External service HTTP 307`.
+
+    A gateway that canonicalises the chat-completions URL is a configuration detail, so
+    the plan stage must complete and reach its human checkpoint.
+    """
+    inner = _mocked_live_handler(FakeLLM())
+
+    def handler(request):
+        if request.url.host == "api.crossref.org":
+            return inner(request)
+        if request.url.path == "/v1/chat/completions":
+            return httpx.Response(307, headers={"Location": "/v1/chat/completions/"})
+        return inner(request)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    provider = _mocked_live_provider(client, DocumentRenderer(tmp_path / "exports"))
+    runner = PipelineRunner(store, provider)
+    job = runner.create_project(brief)
+    state = runner.run(job.job_id)
+    assert state.status == JobStatus.AWAITING_APPROVAL, state.feedback_for_retry
+    assert state.pending_approval == Stage.PLAN
+    assert store.get_artifact(job.job_id, Stage.PLAN, "plan") is not None
+    provider.close()
+
+
+def test_cross_origin_redirect_reports_the_configuration_cause(brief, store, tmp_path):
+    """A redirect off the configured origin is refused and explained, not retried."""
+    seen = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        return httpx.Response(307, headers={"Location": "https://login.example/sso"})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    provider = IntegratedProvider(
+        OpenAIProvider("secret", base_url="https://llm.example/v1", client=client),
+        None,
+        DocumentRenderer(tmp_path),
+    )
+    runner = PipelineRunner(store, provider)
+    job = runner.create_project(brief)
+    state = runner.run(job.job_id)
+    assert state.status == JobStatus.NEEDS_HUMAN
+    assert state.current_stage == Stage.PLAN
+    feedback = state.feedback_for_retry or ""
+    assert "could not run" in feedback
+    assert "redirects to login.example" in feedback
+    assert "base URL" in feedback
+    # The model produced nothing, so the student is not asked to regenerate a stage.
+    assert "regenerate" not in feedback
+    # Each of the runner's three attempts makes exactly one request; the redirect itself
+    # is never followed to another origin.
+    assert seen == ["https://llm.example/v1/chat/completions"] * 3
+    errors = [c for c in store.list_model_calls(job.job_id) if c.status == "provider_error"]
+    assert len(errors) == 3
+    assert all("secret" not in c.error for c in errors)
+    assert store.get_artifact(job.job_id, Stage.PLAN, "plan") is None
     provider.close()
 
 
