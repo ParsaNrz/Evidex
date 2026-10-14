@@ -156,10 +156,34 @@ def _status(args: argparse.Namespace) -> int:
 def _serve(args: argparse.Namespace) -> int:
     import uvicorn
 
+    from evidex.runtime import Settings, load_env_file
+
+    env_file = load_env_file()  # Real environment variables still take precedence.
     if args.demo:
         os.environ["EVIDEX_DEMO"] = "1"
     if args.insecure_cookies:
         os.environ["EVIDEX_SECURE_COOKIES"] = "0"
+    settings = Settings.from_env(load_dotenv=False)
+    print(
+        f"Config: {env_file or 'no .env file found (using process environment only)'}",
+        flush=True,
+    )
+    if settings.demo:
+        print("Mode: DEMO (synthetic fixtures; no LLM or Crossref calls).", flush=True)
+        if settings.llm_key:
+            print(
+                "Note: EVIDEX_LLM_API_KEY is set but ignored because demo mode is on. "
+                "Remove --demo and EVIDEX_DEMO=1 to use the configured LLM.",
+                flush=True,
+            )
+    elif settings.llm_key:
+        print(f"Mode: LIVE (model {settings.llm_model} via {settings.llm_base_url}).", flush=True)
+    else:
+        print(
+            "Mode: LIVE, but EVIDEX_LLM_API_KEY is not set; project creation will be refused. "
+            "Set it in .env or pass --demo for the synthetic demo.",
+            flush=True,
+        )
     uvicorn.run("evidex.api:create_app", factory=True, host=args.host, port=args.port)
     return 0
 
@@ -233,6 +257,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    from evidex.runtime import load_env_file
+
+    load_env_file()
     parser = build_parser()
     args = parser.parse_args()
     raise SystemExit(args.func(args))
