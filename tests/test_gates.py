@@ -6,6 +6,7 @@ from evidex.gates import (
     outline_gate,
     output_gate,
     planning_gate,
+    repeated_sentences,
     review_gate,
     section_gate,
     source_gate,
@@ -247,3 +248,48 @@ def test_output_gate_requires_complete_citation_audit(brief, fake_artifacts):
     assert any(
         check.check_id == "citation_audit_complete" and not check.passed for check in failed.checks
     )
+
+
+def test_demo_writer_never_repeats_a_sentence(brief, fake_artifacts):
+    context = _context(brief, fake_artifacts)
+    outline = DocumentOutline.model_validate(fake_artifacts["outline"])
+    registry = SourceRegistry.model_validate(fake_artifacts["registry"])
+    checked = 0
+    for node in outline.nodes:
+        if not node.word_budget:
+            continue
+        draft = SectionDraft.model_validate(
+            fake_artifacts["fake"]._section(
+                {
+                    "brief": brief.model_dump(mode="json"),
+                    "node": node.model_dump(mode="json"),
+                    "registry": registry.model_dump(mode="json"),
+                }
+            )
+        )
+        assert repeated_sentences(draft.body) == [], node.title
+        assert section_gate(draft, node, context).passed, node.title
+        checked += 1
+    assert checked
+
+
+def test_section_gate_rejects_copy_pasted_sentence(brief, fake_artifacts):
+    context = _context(brief, fake_artifacts)
+    outline = DocumentOutline.model_validate(fake_artifacts["outline"])
+    registry = SourceRegistry.model_validate(fake_artifacts["registry"])
+    node = next(item for item in outline.nodes if item.title == "Problem Statement")
+    draft = SectionDraft.model_validate(
+        fake_artifacts["fake"]._section(
+            {
+                "brief": brief.model_dump(mode="json"),
+                "node": node.model_dump(mode="json"),
+                "registry": registry.model_dump(mode="json"),
+            }
+        )
+    )
+    line = "This section stays within the approved scope, objectives, and method."
+    claim = draft.claims[0].text
+    body = draft.body.split(claim, 1)
+    looped = draft.model_copy(update={"body": claim + " " + " ".join([line] * 40) + body[1][-20:]})
+    result = section_gate(looped, node, context)
+    assert any(c.check_id == "no_repeated_sentences" and not c.passed for c in result.checks)

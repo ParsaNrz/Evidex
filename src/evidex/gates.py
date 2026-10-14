@@ -50,6 +50,25 @@ def word_count(text: str) -> int:
     return len(re.findall(r"\w+", without_citations, flags=re.UNICODE))
 
 
+def repeated_sentences(text: str, min_words: int = 5) -> list[str]:
+    """Return normalised sentences (at least ``min_words`` long) that occur more than once."""
+    text = PLACEHOLDER_PATTERN.sub(" ", CITATION_PATTERN.sub(" ", text))
+    seen: set[str] = set()
+    repeated: list[str] = []
+    for part in re.split(r"[.!?؟۔\n]+", text):
+        sentence = _normalise(part)
+        if len(sentence.split()) < min_words:
+            continue
+        if sentence in seen and sentence not in repeated:
+            repeated.append(sentence)
+        seen.add(sentence)
+    return repeated
+
+
+def _summarise_sentence(sentence: str, limit: int = 80) -> str:
+    return sentence if len(sentence) <= limit else sentence[: limit - 1] + "…"
+
+
 def _normalise(text: str) -> str:
     text = unicodedata.normalize("NFKC", text).casefold()
     return " ".join(re.findall(r"\w+", text, flags=re.UNICODE))
@@ -551,6 +570,7 @@ def section_gate(
     body_numbers = _numbers(draft.body)
     numbers_ok = body_numbers.issubset(traced_numbers)
     language_ok = draft.language == context.brief.language
+    repeats = repeated_sentences(draft.body)
     checks = [
         (
             "section_word_budget",
@@ -617,6 +637,12 @@ def section_gate(
             claim_texts_present,
             "Structured claims must appear in the section body.",
             [claim.claim_id for claim in draft.claims if _normalise(claim.text) not in body_norm],
+        ),
+        (
+            "no_repeated_sentences",
+            not repeats,
+            "The section must not repeat the same sentence; rewrite it with varied, substantive content.",
+            [_summarise_sentence(sentence) for sentence in repeats],
         ),
         (
             "language_matches",
