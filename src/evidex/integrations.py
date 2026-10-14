@@ -70,10 +70,15 @@ def _redirect_method(method: str, status_code: int) -> str:
     return method
 
 
-def _send(client: httpx.Client, method: str, url: str, **kwargs: Any) -> httpx.Response:
+def _is_html(response: httpx.Response) -> bool:
+    content_type = response.headers.get("content-type", "").split(";")[0]
+    return content_type.strip().lower() == "text/html"
+
+
+def _send(client: httpx.Client, method: str, url: str, **kwargs: Any) -> tuple[httpx.Response, int]:
     """One logical request, following a bounded number of same-origin HTTPS redirects.
 
-    Gateways answer 307/308 for ordinary URL details: a canonical trailing slash, an
+    Returns the final response and how many redirects were followed. Gateways answer 307/308 for ordinary URL details: a canonical trailing slash, an
     ingress rewrite, a moved deployment path. Reporting that as a dead endpoint buried a
     one-line configuration fix behind an HTTP status, so redirects are followed here —
     same origin only, HTTPS only, and at most ``MAX_REDIRECTS`` hops. Anything else is
@@ -84,10 +89,11 @@ def _send(client: httpx.Client, method: str, url: str, **kwargs: Any) -> httpx.R
         target = httpx.URL(url)
     except httpx.InvalidURL:
         raise IntegrationError("Configured endpoint is not a valid absolute URL") from None
+    redirects = 0
     for _ in range(MAX_REDIRECTS + 1):
         response = client.request(method, str(target), **kwargs)
         if response.status_code not in REDIRECT_STATUSES:
-            return response
+            return response, redirects
         location = (response.headers.get("location") or "").strip()
         if not location:
             raise IntegrationError(
@@ -112,6 +118,7 @@ def _send(client: httpx.Client, method: str, url: str, **kwargs: Any) -> httpx.R
             for keyword in _BODY_KEYWORDS:
                 kwargs.pop(keyword, None)
         target = next_url
+        redirects += 1
     raise IntegrationError(
         f"External service at {_host_label(target)} redirected more than "
         f"{MAX_REDIRECTS} times; set the configured base URL to the final endpoint"
@@ -122,11 +129,20 @@ def request_json(client: httpx.Client, method: str, url: str, **kwargs: Any) -> 
     # Bounded transport retries; the orchestrator owns stage-level retries.
     for attempt in range(3):
         try:
-            response = _send(client, method, url, **kwargs)
+            response, redirects = _send(client, method, url, **kwargs)
         except httpx.TransportError:
             if attempt == 2:
                 raise IntegrationError("External service connection/timeout failure") from None
         else:
+            # A redirect that lands on an HTML page means the configured base URL points at
+            # a website rather than at the API path: the endpoint answered with its own
+            # login screen instead of a completion.
+            followed = f" after {redirects} redirect(s)" if redirects else ""
+            if redirects and _is_html(response):
+                raise IntegrationError(
+                    f"External service at {_endpoint_label(url)} answered with an HTML page"
+                    f"{followed} instead of JSON; check the configured base URL"
+                )
             if response.is_success:
                 try:
                     value = response.json()
@@ -134,16 +150,20 @@ def request_json(client: httpx.Client, method: str, url: str, **kwargs: Any) -> 
                         raise ValueError()
                     return value
                 except ValueError:
-                    raise IntegrationError("External service returned invalid JSON") from None
+                    raise IntegrationError(
+                        f"External service returned invalid JSON at {_endpoint_label(url)}"
+                        f"{followed}"
+                    ) from None
             if response.status_code != 429 and response.status_code < 500:
                 raise IntegrationError(
                     f"External service HTTP {response.status_code} at "
-                    f"{_endpoint_label(url)}; check the configured endpoint and credentials"
+                    f"{_endpoint_label(url)}{followed}; "
+                    "check the configured endpoint and credentials"
                 )
             if attempt == 2:
                 raise IntegrationError(
                     f"External service HTTP {response.status_code} at "
-                    f"{_endpoint_label(url)} after retries"
+                    f"{_endpoint_label(url)}{followed} after retries"
                 )
         time.sleep(0.5 * (2**attempt))
     raise IntegrationError("External service unavailable")  # pragma: no cover

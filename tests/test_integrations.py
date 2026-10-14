@@ -173,6 +173,36 @@ def test_redirect_to_another_origin_is_refused_and_the_payload_is_not_resent(bri
     assert seen == ["https://llm.example/v1/chat/completions"]  # Never followed, never retried.
 
 
+def test_base_url_without_the_api_path_is_reported_as_a_configuration_error(brief):
+    """A gateway site root instead of its API path redirects to its own login page.
+
+    Evidex must not call that a provider outage, and must never POST the brief and the API
+    key to a login form: the redirect is followed as a bodyless GET, the HTML answer is
+    recognised, and the checkpoint names the base URL as the thing to fix.
+    """
+    seen = []
+
+    def handler(request):
+        seen.append((request.method, str(request.url)))
+        if request.url.path == "/chat/completions":
+            return httpx.Response(302, headers={"Location": "/login?next=%2Fchat%2Fcompletions"})
+        return httpx.Response(
+            200, headers={"Content-Type": "text/html"}, text="<html>Sign in</html>"
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(IntegrationError, match="HTML page") as error:
+            OpenAIProvider(
+                "thk_live_secret", base_url="https://gateway.example", client=client
+            ).complete_json(llm_request(brief))
+    assert "base URL" in str(error.value)
+    assert "secret" not in str(error.value)
+    assert seen == [
+        ("POST", "https://gateway.example/chat/completions"),
+        ("GET", "https://gateway.example/login?next=%2Fchat%2Fcompletions"),
+    ]
+
+
 def test_non_https_redirect_target_is_refused():
     with httpx.Client(
         transport=httpx.MockTransport(
