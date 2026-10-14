@@ -21,3 +21,8 @@ exports/
 *.db
 *.docx
 *.pdf
+
+# Python distribution builds
+build/
+dist/
+*.whl

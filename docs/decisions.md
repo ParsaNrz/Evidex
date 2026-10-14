@@ -22,3 +22,18 @@ This log records defaults chosen where the build brief leaves room for implement
 - **Milestone 1 — complete:** Added the `src/evidex` Python package, Pydantic v2 contracts, a fixed-order resumable runner, SQLite event/artifact/attempt storage, versioned prompts, deterministic gates, a synthetic-only `FakeLLM`, and the `evidex` CLI. Verified with `pytest` (19 tests). The first increment intentionally has no browser UI, real provider adapter, external source connector, or rendered DOCX/PDF. Fixture references are separately typed and permitted only when the provider is in fixture mode; all demo packages carry `demo_mode=true` and no files.
 - **Operational commands:** `pip install -e '.[dev]'`, `pytest`, `evidex demo --auto-approve --fail-first plan`, `evidex run`, `evidex approve`, and `evidex status`.
 - Later milestones must append numbered decisions when a choice affects contracts, privacy, source access, or output behavior.
+
+## Integration/workspace increment (2026-10-14)
+
+| ID | Decision | Rationale / consequence |
+|---|---|---|
+| D-011 | Ship a same-origin static fa/en workspace with FastAPI instead of introducing Next.js now. | Supersedes the initial UI sequencing in D-004. One Python install runs the complete workspace; no Node build, cross-origin token storage, or client-side provider secrets. |
+| D-012 | Use OpenAI-compatible Chat Completions JSON mode for generative stages only. | Existing provider protocol and gates stay authoritative. Intake, registry provenance, dataset placeholders, and filesystem output remain application code. |
+| D-013 | Integrate Crossref first, with individual DOI lookups and deposited abstracts as explicitly labeled verbatim evidence. | No claim of full-text access or exhaustive retraction/semantic verification. Missing abstracts and insufficient coverage fail closed. Other scholarly providers remain roadmap items. |
+| D-014 | Use scrypt credentials and revocable hashed opaque sessions in a local account database. | Avoids persistent bearer tokens in browser storage; per-owner access checks apply to every project action and download. HTTPS/Secure cookies are default; recovery, MFA, and email verification remain future work. |
+| D-015 | Use a bounded in-process thread pool and per-job filesystem locks over the resumable runner. | Queue acceptance is not durable and resumes after restart are manual. This is local execution infrastructure, not a substitute for D-009's future distributed worker. |
+| D-016 | Render DOCX with python-docx and PDF with fpdf2 + HarfBuzz + a Unicode TTF font. | No LibreOffice service required; Arabic/Persian shaping supported. Style-compliant CSL, TOC, custom university templates, and exact pagination are explicitly not promised. |
+| D-017 | Persist project demo/live mode and require live AI disclosure. | Restart cannot silently insert fixtures into a live project; demo web exports remain labeled synthetic. Original CLI fixture demo stays non-rendering for compatibility. |
+| D-018 | Package prompts alongside Python code. | Moves canonical versioned files to `src/evidex/prompts/`; installed wheels work outside the Git checkout. |
+
+This increment adds working baseline integrations across milestones 2–8, not completion of every roadmap deliverable. Tests use injected HTTP mocks; actual external API access depends on deployment network permissions and configured credentials. Authentication, rendered output, and the browser flow are independently runnable in explicit demo mode.
