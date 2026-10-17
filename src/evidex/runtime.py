@@ -56,8 +56,8 @@ class Settings:
     secure_cookies: bool = True
     registration: bool = True
     llm_key: str = field(default="", repr=False)
-    llm_model: str = "gpt-4o-mini"
-    llm_base_url: str = "https://api.openai.com/v1"
+    llm_model: str = "zai-org/GLM-5.3-Flash"
+    llm_base_url: str = "https://inference.dahl.global/v1"
     crossref_mailto: str = ""
     pdf_font: str = ""  # Empty means "discover an installed Unicode TTF font".
 
@@ -71,8 +71,8 @@ class Settings:
             secure_cookies=os.getenv("EVIDEX_SECURE_COOKIES", "1") == "1",
             registration=os.getenv("EVIDEX_REGISTRATION", "1") == "1",
             llm_key=os.getenv("EVIDEX_LLM_API_KEY", ""),
-            llm_model=os.getenv("EVIDEX_LLM_MODEL", "gpt-4o-mini"),
-            llm_base_url=os.getenv("EVIDEX_LLM_BASE_URL", "https://api.openai.com/v1"),
+            llm_model=os.getenv("EVIDEX_LLM_MODEL", "zai-org/GLM-5.3-Flash"),
+            llm_base_url=os.getenv("EVIDEX_LLM_BASE_URL", "https://inference.dahl.global/v1"),
             crossref_mailto=os.getenv("EVIDEX_CROSSREF_MAILTO", ""),
             pdf_font=os.getenv("EVIDEX_PDF_FONT", ""),
         )

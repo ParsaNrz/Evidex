@@ -14,6 +14,20 @@ def _clean(monkeypatch):
         monkeypatch.delenv(key, raising=False)
 
 
+def test_defaults_target_the_dahl_gateway(tmp_path, monkeypatch):
+    _clean(monkeypatch)
+    monkeypatch.chdir(tmp_path)  # No repository .env may leak into the defaults.
+    settings = Settings.from_env()
+    assert settings.llm_base_url == "https://inference.dahl.global/v1"
+    assert settings.llm_model == "zai-org/GLM-5.3-Flash"
+    assert settings.llm_key == ""  # The key comes only from the environment, never a default.
+    monkeypatch.setenv("EVIDEX_LLM_API_KEY", "dahl-key-from-env")
+    provider = make_provider(Settings.from_env())
+    assert provider.llm.base_url == "https://inference.dahl.global/v1"
+    assert provider.llm.model == "zai-org/GLM-5.3-Flash"
+    provider.close()
+
+
 def test_env_file_configures_live_llm(tmp_path, monkeypatch):
     _clean(monkeypatch)
     env = tmp_path / ".env"

@@ -45,16 +45,18 @@ Set these variables **in your local shell or deployment secret manager**, not in
 
 ```bash
 export EVIDEX_DEMO=0
-export EVIDEX_LLM_API_KEY='<your-provider-key>'
-export EVIDEX_LLM_MODEL='gpt-4o-mini'
+export EVIDEX_LLM_API_KEY='<your-dahl-api-key>'   # the key lives only in the environment
+export EVIDEX_LLM_MODEL='zai-org/GLM-5.3-Flash'   # default
 export EVIDEX_CROSSREF_MAILTO='research-admin@example.edu'
-# Optional for an OpenAI-compatible service:
+# Default base URL already targets the Dahl gateway:
+#   https://inference.dahl.global/v1/chat/completions
+# Optional override for another OpenAI-compatible service:
 # export EVIDEX_LLM_BASE_URL='https://your-provider.example/v1'
 
 evidex serve --host 0.0.0.0 --port 8000
 ```
 
-Use an HTTPS reverse proxy. For local HTTP testing only, append `--insecure-cookies`. The model must support Chat Completions JSON-object mode and the configured output limit (12,000 tokens). Live mode refuses project creation when no API key is configured; it never silently falls back to the fake provider.
+Use an HTTPS reverse proxy. For local HTTP testing only, append `--insecure-cookies`. The adapter requests Chat Completions JSON-object mode; if the endpoint rejects that optional parameter (some compatible gateways do), Evidex retries once without it and still validates the returned JSON against the stage schema. The model must honor the configured output limit (12,000 tokens). Live mode refuses project creation when no API key is configured; it never silently falls back to the fake provider.
 
 Crossref currently needs no API key; a contact email is recommended. The server needs outbound HTTPS to `api.crossref.org` and the configured LLM host. No credentials are sent to the browser. The live adapter tests use HTTP mocks; tests do not require a network or spend API credits. Live calls still require validation in your provider/network environment.
 
@@ -73,9 +75,9 @@ evidex serve --insecure-cookies --host 0.0.0.0 --port 8000   # no --demo: uses t
 |---|---|---|
 | `EVIDEX_DATA_DIR` | `.evidex` | Private DB, lock, and export directory; keep outside public static hosting |
 | `EVIDEX_DEMO` | `0` | Explicit fixture mode when `1`; mode is persisted per project |
-| `EVIDEX_LLM_API_KEY` | unset | Server-side provider secret, required for live execution |
-| `EVIDEX_LLM_MODEL` | `gpt-4o-mini` | JSON-capable model name |
-| `EVIDEX_LLM_BASE_URL` | `https://api.openai.com/v1` | Trusted, administrator-configured HTTPS endpoint |
+| `EVIDEX_LLM_API_KEY` | unset | Server-side provider secret, required for live execution; keep it in `.env` or the process environment, never in code |
+| `EVIDEX_LLM_MODEL` | `zai-org/GLM-5.3-Flash` | JSON-capable model name |
+| `EVIDEX_LLM_BASE_URL` | `https://inference.dahl.global/v1` | Trusted, administrator-configured HTTPS endpoint (Dahl gateway by default) |
 | `EVIDEX_CROSSREF_MAILTO` | unset | Crossref contact email |
 | `EVIDEX_PDF_FONT` | unset (auto-detect) | Explicit Unicode TTF for embedded PDF text; when unset, common DejaVu/Noto/Vazirmatn/system fonts are searched |
 | `EVIDEX_SECURE_COOKIES` | `1` | Keep enabled for HTTPS; `0` for local HTTP only |
