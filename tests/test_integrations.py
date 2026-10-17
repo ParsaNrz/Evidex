@@ -72,6 +72,74 @@ def test_openai_contract_includes_schema_feedback_template_and_usage(brief):
     assert len(requests) == 1
 
 
+def test_dahl_gateway_contract_model_and_json_mode_fallback(brief):
+    """Default target is the Dahl gateway; a 400 on `response_format` retries once."""
+    output = FakeLLM()._plan({"brief": brief.model_dump(mode="json")})
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        assert request.headers["Authorization"] == "Bearer test-secret"
+        body = json.loads(request.content)
+        if "response_format" in body:
+            return httpx.Response(400, json={"error": "response_format is not supported"})
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": json.dumps(output)}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 20},
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        response = OpenAIProvider("test-secret", client=client).complete_json(llm_request(brief))
+    assert response.output == output
+    assert response.provider == "openai-compatible"
+    assert [str(r.url) for r in requests] == [
+        "https://inference.dahl.global/v1/chat/completions",
+        "https://inference.dahl.global/v1/chat/completions",
+    ]
+    assert json.loads(requests[0].content)["model"] == "zai-org/GLM-5.3-Flash"
+    assert "response_format" in json.loads(requests[0].content)
+    assert "response_format" not in json.loads(requests[1].content)
+    # The compatibility fallback is bounded: never a loop of doomed calls.
+    assert len(requests) == 2
+
+
+def test_persistent_http_400_after_fallback_is_reported_once(brief, monkeypatch):
+    monkeypatch.setattr("evidex.integrations.time.sleep", lambda _: None)
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(400)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(IntegrationError, match="HTTP 400"):
+            OpenAIProvider("secret", client=client).complete_json(llm_request(brief))
+    assert len(calls) == 2  # original attempt plus exactly one fallback attempt
+
+
+@pytest.mark.parametrize("style", ["fenced", "parts", "fenced_parts"])
+def test_assistant_content_variants_are_normalized_before_schema_validation(brief, style):
+    output = FakeLLM()._plan({"brief": brief.model_dump(mode="json")})
+    raw = json.dumps(output)
+    if style == "fenced":
+        content = "```json\n" + raw + "\n```"
+    elif style == "parts":
+        content = [{"type": "text", "text": raw}]
+    else:
+        content = [{"type": "text", "text": "```json\n" + raw + "\n```"}]
+
+    with httpx.Client(
+        transport=httpx.MockTransport(
+            lambda r: httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+        )
+    ) as client:
+        response = OpenAIProvider("secret", client=client).complete_json(llm_request(brief))
+    assert response.output == output
+
+
 @pytest.mark.parametrize("content", ["not JSON", "[]", '{"unexpected":"field"}'])
 def test_malformed_llm_output_rejected(brief, content):
     with httpx.Client(
